@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 import aiohttp
-import psycopg2 # Повернули стару бібліотеку
+import psycopg2
 import google.generativeai as genai
 
 # --- Налаштування ---
@@ -29,31 +29,35 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Підпис для помилок
-ERROR_SIGNATURE = "\n\n📩 <b>Перешліть це повідомлення програмісту Наті, вона знає що з цим робити.</b>"
+# Підпис для помилок (також без HTML)
+ERROR_SIGNATURE = "\n\n📩 Перешліть це повідомлення програмісту Наті, вона знає що з цим робити."
 
-# --- Допоміжні функції (Взяті з твого старого коду) ---
+# --- Допоміжні функції ---
 def clean_text(text):
-    text = text.replace("**", "").replace("### ", "").replace("## ", "")
-    clean = re.compile('<.*?>')
-    return re.sub(clean, '', text).strip()
+    # Жорстка очистка від будь-яких залишків форматування
+    text = text.replace("```html", "").replace("```", "")
+    text = text.replace("**", "").replace("__", "")
+    text = text.replace("<b>", "").replace("</b>", "")
+    text = text.replace("<i>", "").replace("</i>", "")
+    return text.strip()
 
 def connect_to_db():
-    # Проста функція підключення через psycopg2
     return psycopg2.connect(DATABASE_URL)
 
-# --- 1. Логіка AI (Gemini) ---
+# --- 1. Логіка AI (Gemini - Plain Text) ---
 async def generate_ai_post(topic, prompt_text):
     try:
         sys_prompt = (
             f"Ти — автор Telegram-каналу 'Data Nata'. Твоя аудиторія — новачки в IT. "
             f"Стиль: дружній, зрозумілий, без води. Використовуй емодзі. "
             f"Пиши українською мовою. "
+            f"ВАЖЛИВО: Пиши звичайним текстом. "
+            f"НЕ використовуй жирний шрифт, курсив, заголовки або Markdown. "
+            f"НЕ використовуй HTML теги. Просто текст і емодзі. "
             f"Тема: {topic}. "
             f"Контекст: {prompt_text}. "
             f"Максимальна довжина — 950 символів."
         )
-        # Використовуємо async версію Gemini, вона не блокує бота
         response = await model.generate_content_async(sys_prompt)
         return clean_text(response.text)
     except Exception as e:
@@ -76,26 +80,19 @@ async def get_random_photo(query):
     
     return "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop"
 
-# --- 3. Основна функція (Draft) ---
+# --- 3. Основна функція ---
 async def prepare_draft(manual_date=None, from_command=False):
     target_date = manual_date if manual_date else datetime.datetime.now().date()
     
     conn = None
     try:
-        # СИНХРОННЕ підключення (як було раніше)
         conn = connect_to_db()
         cursor = conn.cursor()
         
-        # Виконуємо SQL
         cursor.execute("SELECT * FROM content_plan WHERE publish_date = %s AND status = 'pending'", (target_date,))
-        # fetchrow у psycopg2 немає, є fetchone, який повертає кортеж (id, date, topic...)
-        # Тому нам треба звертатись за індексами: 0-id, 1-date, 2-topic, 3-prompt... (залежить від структури)
-        # Або зробимо простіше - DictCursor, але щоб не ускладнювати, візьмемо дані так:
         row = cursor.fetchone()
         
         if row:
-            # Важливо: Треба знати порядок колонок у твоїй таблиці. 
-            # При створенні ми писали: id, publish_date, topic, prompt, photo_query, final_text, status
             post_id = row[0]
             topic = row[2]
             prompt_db = row[3]
@@ -103,16 +100,14 @@ async def prepare_draft(manual_date=None, from_command=False):
             final_text = row[5]
             
             if from_command:
-                await bot.send_message(ADMIN_ID, f"👩‍💻 Data Nata: Готую пост про **{topic}**...")
+                # Навіть службові повідомлення тепер без Markdown
+                await bot.send_message(ADMIN_ID, f"👩‍💻 Data Nata: Готую пост про {topic}...")
 
-            # Генерація тексту
             if not final_text:
                 final_text = await generate_ai_post(topic, prompt_db)
-                # Оновлюємо базу
                 cursor.execute("UPDATE content_plan SET final_text=%s WHERE id=%s", (final_text, post_id))
-                conn.commit() # У psycopg2 треба робити коміт!
+                conn.commit()
             
-            # Фото
             photo_url = await get_random_photo(photo_query)
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -121,6 +116,7 @@ async def prepare_draft(manual_date=None, from_command=False):
                 [InlineKeyboardButton(text="📝 Інший текст", callback_data=f"text_{post_id}")]
             ])
             
+            # ВІДСУТНІЙ parse_mode = Тільки текст
             await bot.send_photo(
                 chat_id=ADMIN_ID, 
                 photo=photo_url, 
@@ -136,20 +132,20 @@ async def prepare_draft(manual_date=None, from_command=False):
         
     except Exception as e:
         if conn: conn.close()
-        await bot.send_message(ADMIN_ID, f"🆘 Помилка: {e}{ERROR_SIGNATURE}", parse_mode="HTML")
+        await bot.send_message(ADMIN_ID, f"🆘 Помилка: {e}{ERROR_SIGNATURE}")
 
 # --- Команди ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Data Nata Bot Online (Classic DB)\n/check - Перевірити план")
+        await message.answer("👋 Data Nata Bot Online (Plain Text Mode)\n/check - Перевірити план")
 
 @dp.message(Command("check"))
 async def cmd_check(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         await prepare_draft(from_command=True)
 
-# --- Кнопки (Callbacks) ---
+# --- Кнопки ---
 @dp.callback_query(F.data.startswith("photo_"))
 async def regen_photo(callback: types.CallbackQuery):
     post_id = int(callback.data.split("_")[1])
@@ -165,6 +161,7 @@ async def regen_photo(callback: types.CallbackQuery):
 
         if row:
             new_photo_url = await get_random_photo(row[0])
+            # Без parse_mode
             media = InputMediaPhoto(media=new_photo_url, caption=callback.message.caption)
             await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
     except Exception as e:
@@ -189,6 +186,7 @@ async def regen_text(callback: types.CallbackQuery):
             cursor.close()
             conn.close()
             
+            # Без parse_mode
             await callback.message.edit_caption(caption=new_text[:1024], reply_markup=callback.message.reply_markup)
     except Exception as e:
         if conn: conn.close()
@@ -199,6 +197,7 @@ async def publish_to_channel(callback: types.CallbackQuery):
     post_id = int(callback.data.split("_")[1])
     conn = None
     try:
+        # Без parse_mode - чистий текст
         await bot.send_photo(chat_id=CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=callback.message.caption)
         
         conn = connect_to_db()
@@ -208,11 +207,12 @@ async def publish_to_channel(callback: types.CallbackQuery):
         cursor.close()
         conn.close()
         
-        await callback.message.edit_caption(caption=f"✅ <b>ОПУБЛІКОВАНО</b>\n\n{callback.message.caption}", parse_mode="HTML")
+        # Використовуємо лише емодзі для виділення
+        await callback.message.edit_caption(caption=f"✅ ОПУБЛІКОВАНО\n\n{callback.message.caption}")
     except Exception as e:
          await callback.answer(f"Помилка публікації: {e}", show_alert=True)
 
-# --- Web Server (Для Render Uptime) ---
+# --- Web Server ---
 async def handle(request): 
     return web.Response(text="Data Nata Bot is Running!")
 
@@ -230,7 +230,8 @@ async def main():
     scheduler.start()
     
     try:
-        await bot.send_message(ADMIN_ID, "✨ Data Nata System Online (Psycopg2) 👩‍💻", parse_mode="HTML")
+        # Без HTML
+        await bot.send_message(ADMIN_ID, "✨ Data Nata System Online (Plain Text Mode)")
     except:
         pass
 
