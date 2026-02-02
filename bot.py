@@ -3,286 +3,220 @@ import asyncio
 import logging
 import datetime
 import time
-import requests
-import psycopg2
 import re
-import google.generativeai as genai
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InputMediaPhoto
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
+import aiohttp
+import asyncpg
+import google.generativeai as genai
 
 # --- Налаштування ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-UNSPLASH_KEY = os.environ.get("UNSPLASH_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Твій ключ Gemini
+PORT = int(os.environ.get("PORT", 8080))
 
 # Налаштування Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash') # Використовуємо актуальну швидку модель
+model = genai.GenerativeModel('gemini-1.5-flash') # Використовуємо швидку модель
 
+# Ініціалізація
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- ПІДПИС ДЛЯ ПОМИЛОК ---
-ERROR_SIGNATURE = "\n\n📩 <b>Перешлите это сообщение программисту Нате, она знает что с этим делать и поможет вам исправить ошибку.</b>"
+# Підпис для помилок
+ERROR_SIGNATURE = "\n\n📩 <b>Перешліть це повідомлення програмісту Наті, вона знає що з цим робити.</b>"
 
 # --- Допоміжні функції ---
 def clean_text(text):
-    text = text.replace("### ", "").replace("## ", "")
-    # Прибираємо зайві зірочки, якщо Gemini перестарався, але залишаємо жирний шрифт для Markdown
+    # Прибираємо зайве форматування, якщо модель вирішить додати забагато зірочок
+    text = text.replace("**", "").replace("### ", "").replace("## ", "")
     clean = re.compile('<.*?>')
     return re.sub(clean, '', text).strip()
 
-def connect_to_db_with_retry():
-    for i in range(3):
-        try:
-            return psycopg2.connect(DATABASE_URL)
-        except Exception as e:
-            time.sleep(5)
-            if i == 2: raise e
+async def get_db_connection():
+    return await asyncpg.connect(DATABASE_URL)
 
-# --- 1. Логіка AI (GEMINI) ---
-async def generate_ai_post(topic, context, platform):
-    if platform == "tg":
-        role_desc = "Ти автор Telegram-каналу 'Data Nata'. Ти розробниця Python."
-        requirements = "Стиль: корисний, дружній, структурований, для новачків. Використовуй markdown (жирний шрифт для заголовків). Пиши українською."
-    else: 
-        role_desc = "Ти IT-блогер в Instagram (Data Nata)."
-        requirements = "Стиль: естетичний, емоційний, короткий, lifestyle. Додай тематичні хештеги в кінці. Пиши українською."
-
-    prompt = (
-        f"{role_desc}\n"
-        f"Тема посту: {topic}.\n"
-        f"Деталі/Вказівки: {context}.\n"
-        f"Вимоги: {requirements}\n"
-        f"ВАЖЛИВО: Не пиши вступних слів (типу 'Ось твій пост'). Одразу пиши текст публікації."
-    )
-    
+# --- 1. Логіка AI (Gemini) ---
+async def generate_ai_post(topic, prompt_text):
     try:
-        response = model.generate_content(prompt)
+        # Промпт спеціально під Data Nata
+        sys_prompt = (
+            f"Ти — автор Telegram-каналу 'Data Nata'. Твоя аудиторія — новачки в IT. "
+            f"Стиль: дружній, зрозумілий, без води. Використовуй емодзі. "
+            f"Пиши українською мовою. "
+            f"Тема: {topic}. "
+            f"Контекст: {prompt_text}. "
+            f"Максимальна довжина — 900 символів."
+        )
+        
+        # Асинхронний виклик Gemini
+        response = await model.generate_content_async(sys_prompt)
         return clean_text(response.text)
     except Exception as e:
         return f"ERROR_AI: {str(e)}"
 
-# --- 2. Пошук фото (Unsplash) ---
-async def get_random_photo(keywords):
-    if not keywords: return None # Якщо в базі пусто, фото не шукаємо
-
-    # Рівень 1: Шукаємо те, що в базі
-    url = f"https://api.unsplash.com/photos/random?query={keywords}&client_id={UNSPLASH_KEY}&orientation=landscape&count=1&t={int(time.time())}"
+# --- 2. Пошук фото ---
+async def get_random_photo(query):
+    if not UNSPLASH_KEY:
+        return "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop"
+    
+    # Додаємо трохи рандому, щоб кеш не віддавав одне й те саме
+    url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     try:
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data[0]['urls']['regular']
-            elif isinstance(data, dict) and 'urls' in data:
-                return data['urls']['regular']
-        
-        # Рівень 2: Запасний варіант (IT естетика)
-        elif response.status_code == 404:
-            backup_url = f"https://api.unsplash.com/photos/random?query=coding+setup+neon&client_id={UNSPLASH_KEY}&orientation=landscape&count=1&t={int(time.time())}"
-            backup_response = requests.get(backup_url, timeout=10)
-            if backup_response.status_code == 200:
-                data = backup_response.json()
-                return data['urls']['regular'] if 'urls' in data else None
-
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data['urls']['regular']
     except Exception as e:
         logging.error(f"Unsplash Error: {e}")
     
-    # Рівень 3: Аварійна заглушка (просто красивий код)
+    # Запасне фото (IT Setup)
     return "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop"
 
-# --- 3. Основна функція (Адаптовано під нові таблиці) ---
-async def prepare_draft(platform, manual_day=None, from_command=False):
-    day_now = manual_day if manual_day else datetime.datetime.now().day
-    
-    # Визначаємо таблицю
-    if platform == "tg":
-        table_name = "telegram_plan"
-        platform_name = "Telegram"
-    else:
-        table_name = "instagram_plan"
-        platform_name = "Instagram"
+# --- 3. Основна функція ---
+async def prepare_draft(manual_date=None, from_command=False):
+    target_date = manual_date if manual_date else datetime.datetime.now().date()
     
     try:
-        conn = connect_to_db_with_retry()
-        cursor = conn.cursor()
+        conn = await get_db_connection()
+        # Шукаємо пост на сьогодні
+        row = await conn.fetchrow(
+            "SELECT * FROM content_plan WHERE publish_date = $1 AND status = 'pending'", 
+            target_date
+        )
         
-        # Запит під нову структуру (day, topic, ai_prompt, photo_query)
-        cursor.execute(f"SELECT topic, ai_prompt, photo_query FROM {table_name} WHERE day = %s", (day_now,))
-        result = cursor.fetchone()
-        
-        if result:
-            topic, ai_prompt, photo_query = result
+        if row:
+            post_id = row['id']
+            topic = row['topic']
+            final_text = row['final_text']
+            photo_query = row['photo_query']
             
-            # Сповіщення про старт
             if from_command:
-                await bot.send_message(ADMIN_ID, f"🔮 Генерую для {platform_name} (День {day_now})...")
-            elif not manual_day:
-                await bot.send_message(ADMIN_ID, f"⏰ Час посту для {platform_name}!")
+                await bot.send_message(ADMIN_ID, f"👩‍💻 Генерую пост про: {topic}...")
 
-            # Генерація контенту
-            full_post_text = await generate_ai_post(topic, ai_prompt, platform)
+            # Генерація тексту (якщо немає)
+            if not final_text:
+                final_text = await generate_ai_post(topic, row['prompt'])
+                # Зберігаємо чернетку
+                await conn.execute("UPDATE content_plan SET final_text=$1 WHERE id=$2", final_text, post_id)
+            
+            # Фото
             photo_url = await get_random_photo(photo_query)
             
-            # Обрізаємо для підпису (ліміт Телеграму 1024 символи)
-            caption = full_post_text
-            if len(caption) > 1020: caption = caption[:1015] + "..."
-            
             # Кнопки
-            builder = InlineKeyboardBuilder()
-            if platform == "tg":
-                builder.row(types.InlineKeyboardButton(text="✅ Опублікувати", callback_data="confirm_publish"))
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Опублікувати", callback_data=f"publish_{post_id}")],
+                [InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"photo_{post_id}")],
+                [InlineKeyboardButton(text="📝 Інший текст", callback_data=f"text_{post_id}")]
+            ])
             
-            builder.row(
-                types.InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"photo_{platform}_{day_now}"),
-                types.InlineKeyboardButton(text="📝 Інший текст", callback_data=f"text_{platform}_{day_now}")
+            # Відправка
+            await bot.send_photo(
+                chat_id=ADMIN_ID, 
+                photo=photo_url, 
+                caption=final_text[:1024], 
+                reply_markup=keyboard
             )
-            
-            # Відправка (з фото або без)
-            if photo_url:
-                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-                # Якщо текст задовгий, хвостик шлемо окремо
-                if len(full_post_text) > 1020:
-                     await bot.send_message(chat_id=ADMIN_ID, text=full_post_text[1020:], parse_mode="Markdown")
-            else:
-                # Тільки текст (якщо в базі NULL для фото)
-                await bot.send_message(chat_id=ADMIN_ID, text=full_post_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-
         else:
             if from_command:
-                await bot.send_message(ADMIN_ID, f"⚠️ У таблиці {table_name} немає теми на день {day_now}!")
+                await bot.send_message(ADMIN_ID, f"⚠️ У плані немає постів на {target_date}!")
             
-        cursor.close()
-        conn.close()
+        await conn.close()
     except Exception as e:
-        await bot.send_message(ADMIN_ID, f"🆘 Помилка ({platform}): {e}{ERROR_SIGNATURE}", parse_mode="HTML")
+        await bot.send_message(ADMIN_ID, f"🆘 Помилка: {e}{ERROR_SIGNATURE}", parse_mode="HTML")
 
 # --- Обробка команд ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Бот Data Nata на зв'язку!\n/generate_tg - Тест Телеграм\n/generate_inst - Тест Інста")
+        await message.answer("👋 Data Nata Bot Ready (Gemini)\n/check_today - Перевірити план на сьогодні")
 
-@dp.message(Command("generate_tg"))
-async def cmd_gen_tg(message: types.Message):
+@dp.message(Command("check_today"))
+async def cmd_check(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await prepare_draft(platform="tg", from_command=True)
-
-@dp.message(Command("generate_inst"))
-async def cmd_gen_inst(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        await prepare_draft(platform="inst", from_command=True)
+        await prepare_draft(from_command=True)
 
 # --- Callbacks ---
 @dp.callback_query(F.data.startswith("photo_"))
 async def regen_photo(callback: types.CallbackQuery):
-    _, platform, day = callback.data.split("_")
-    day = int(day)
-    table_name = "telegram_plan" if platform == "tg" else "instagram_plan"
-
-    await callback.answer("🔄 Шукаю нове фото...")
+    post_id = int(callback.data.split("_")[1])
     try:
-        conn = connect_to_db_with_retry()
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT photo_query FROM {table_name} WHERE day = %s", (day,))
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        await callback.answer("🔄 Шукаю нове фото...")
+        conn = await get_db_connection()
+        row = await conn.fetchrow("SELECT photo_query FROM content_plan WHERE id=$1", post_id)
+        await conn.close()
 
-        if result and result[0]:
-            new_photo_url = await get_random_photo(result[0])
+        if row:
+            new_photo_url = await get_random_photo(row['photo_query'])
             media = InputMediaPhoto(media=new_photo_url, caption=callback.message.caption)
             await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
-        else:
-            await callback.answer("У цьому пості фото не передбачено.", show_alert=True)
-            
     except Exception as e:
         await callback.message.answer(f"Помилка: {e}")
 
 @dp.callback_query(F.data.startswith("text_"))
 async def regen_text(callback: types.CallbackQuery):
-    _, platform, day = callback.data.split("_")
-    day = int(day)
-    table_name = "telegram_plan" if platform == "tg" else "instagram_plan"
-
-    await callback.answer("📝 Переписую текст...")
+    post_id = int(callback.data.split("_")[1])
     try:
-        conn = connect_to_db_with_retry()
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT topic, ai_prompt FROM {table_name} WHERE day = %s", (day,))
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-
-        if result:
-            new_text = await generate_ai_post(result[0], result[1], platform)
+        await callback.answer("📝 Переписую текст (Gemini)...")
+        conn = await get_db_connection()
+        row = await conn.fetchrow("SELECT topic, prompt FROM content_plan WHERE id=$1", post_id)
+        
+        if row:
+            new_text = await generate_ai_post(row['topic'], row['prompt'])
+            # Оновлюємо в базі
+            await conn.execute("UPDATE content_plan SET final_text=$1 WHERE id=$2", new_text, post_id)
+            await conn.close()
             
-            # Якщо повідомлення з фото - міняємо caption
-            if callback.message.photo:
-                new_caption = new_text
-                if len(new_caption) > 1020: new_caption = new_caption[:1015] + "..."
-                await callback.message.edit_caption(caption=new_caption, reply_markup=callback.message.reply_markup, parse_mode="Markdown")
-            # Якщо повідомлення текстове - міняємо text
-            else:
-                await callback.message.edit_text(text=new_text, reply_markup=callback.message.reply_markup, parse_mode="Markdown")
-            
+            await callback.message.edit_caption(caption=new_text[:1024], reply_markup=callback.message.reply_markup)
     except Exception as e:
         await callback.message.answer(f"Помилка: {e}")
 
-@dp.callback_query(F.data == "confirm_publish")
+@dp.callback_query(F.data.startswith("publish_"))
 async def publish_to_channel(callback: types.CallbackQuery):
-    # Отримуємо текст (з підпису фото або з самого тексту)
-    content = callback.message.caption if callback.message.caption else callback.message.text
-    
+    post_id = int(callback.data.split("_")[1])
     try:
-        if callback.message.photo:
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=content, parse_mode="Markdown")
-        else:
-            await bot.send_message(chat_id=CHANNEL_ID, text=content, parse_mode="Markdown")
-            
-        success_msg = f"✅ <b>ОПУБЛІКОВАНО В КАНАЛ</b>\n\n{content[:50]}..."
+        await bot.send_photo(chat_id=CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=callback.message.caption)
         
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=success_msg, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(text=success_msg, parse_mode="HTML")
-            
+        conn = await get_db_connection()
+        await conn.execute("UPDATE content_plan SET status='done' WHERE id=$1", post_id)
+        await conn.close()
+        
+        await callback.message.edit_caption(caption=f"✅ <b>ОПУБЛІКОВАНО</b>\n\n{callback.message.caption}", parse_mode="HTML")
     except Exception as e:
-        await callback.message.answer(f"Не вдалося опублікувати: {e}", show_alert=True)
+         await callback.answer(f"Помилка публікації: {e}", show_alert=True)
 
-# --- Сервер ---
-async def handle(request): return web.Response(text="Data Nata Bot is Running!")
+# --- Сервер (Точно як у твоєму прикладі) ---
+async def handle(request): return web.Response(text="Data Nata Bot Running")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
+    
+    # 1. Запуск веб-сервера (Для Render/Uptime)
     app = web.Application()
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000))).start()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
     
+    # 2. Планувальник
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
-    # ТГ о 09:00
-    scheduler.add_job(prepare_draft, 'cron', hour=9, minute=0, args=['tg'], misfire_grace_time=3600)
-    # Інста о 09:10
-    scheduler.add_job(prepare_draft, 'cron', hour=9, minute=10, args=['inst'], misfire_grace_time=3600)
+    scheduler.add_job(prepare_draft, 'cron', hour=9, minute=0)
     scheduler.start()
     
-    print("🤖 Бот запущений!")
     try:
-        await bot.send_message(ADMIN_ID, "✨ Бот Data Nata активний! 🐍")
+        await bot.send_message(ADMIN_ID, "✨ Data Nata System Online (Gemini Powered) 👩‍💻", parse_mode="HTML")
     except:
         pass
 
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
