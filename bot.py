@@ -45,39 +45,41 @@ async def generate_quiz_data(topic, prompt_text):
         return None
 
 async def generate_ai_text(topic, prompt_text, platform, has_photo):
-    """Генерація тексту (Оптимізовані ліміти)"""
+    """Генерація тексту з ТЕГАМИ"""
     try:
         if has_photo:
-            # ТЕЛЕГРАМ ЛІМІТ ДЛЯ ПІДПИСУ = 1024.
-            # Ставимо 980, щоб використати максимум, але мати мізерний запас.
             char_limit = 980   
             type_desc = "Змістовний, цікавий пост під фото"
         else:
-            # ТЕЛЕГРАМ ЛІМІТ ДЛЯ ТЕКСТУ = 4096.
-            # Ставимо 1500, щоб це було легке мікро-навчання (один екран).
             char_limit = 1500  
             type_desc = "Лаконічний пост. Одна головна думка."
 
+        # ДОДАНО ІНСТРУКЦІЮ ПРО ТЕГИ
         sys_prompt = (
             f"Ти — Data Nata. Пишеш для {platform}. "
             f"Тема: {topic}. Деталі: {prompt_text}. "
             f"Мова: Українська. "
             f"Вимоги: "
             f"1. {type_desc}. "
-            f"2. Максимальний ліміт — {char_limit} символів. Намагайся використати цей обсяг з користю. "
+            f"2. Максимальний ліміт — {char_limit} символів. "
             f"3. Пиши живою мовою, з емодзі. "
-            f"4. Без Markdown (зірочок). Тільки чистий текст."
+            f"4. Без Markdown (зірочок). Тільки чистий текст. "
+            f"5. В кінці посту обов'язково додай ОДИН тег із цього списку (відповідно до змісту): "
+            f"#theory (якщо це теорія/база), "
+            f"#quiz (якщо це тест/завдання), "
+            f"#lifehack (якщо це порада/інструмент), "
+            f"#start (якщо це мотивація/початок). "
+            f"НЕ вигадуй свої теги."
         )
         
         response = await model.generate_content_async(sys_prompt)
         text = response.text.replace("**", "").replace("__", "").replace("```", "").strip()
         
-        # Запобіжник: якщо AI трохи перевищив ліміт, обрізаємо акуратно
         if len(text) > char_limit:
             text = text[:char_limit]
             last_dot = text.rfind('.')
             if last_dot > 0:
-                text = text[:last_dot+1] # Обрізаємо до останньої повної крапки
+                text = text[:last_dot+1]
             
         return text
     except Exception as e:
@@ -144,18 +146,15 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
             # ВІДПРАВКА
             if is_quiz and quiz_data:
                 p = quiz_data.split("|")
-                # Для квізу текст може бути довгим (1500), бо йде окремим повідомленням
                 await bot.send_message(ADMIN_ID, f"🧠 Завдання:\n{generated_text}")
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
                 photo_url = await get_photo_url(photo_query)
                 keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
-                # Тут текст обрізаний до 980, все безпечно
                 await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
 
             else: 
-                # Текст до 1500
                 await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
 
         else:
@@ -174,7 +173,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (Balanced Limits)")
+        await message.answer("👋 Bot Online (Tags Added)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
