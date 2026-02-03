@@ -21,7 +21,7 @@ UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 8080))
 
-# AI Config
+# 1. ВИПРАВЛЕНО НАЗВУ МОДЕЛІ (як ти просила)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-flash-latest')
 
@@ -37,7 +37,7 @@ async def generate_quiz_data(topic, prompt_text):
     """Генерація квізу"""
     sys_prompt = (
         f"Створи квіз для Telegram. Тема: {topic}. Контекст: {prompt_text}. "
-        f"Формат: Питання?|Відповідь1|Відповідь2|Відповідь3|НомерПравильної(0-2)"
+        f"Формат суворо такий: Питання?|Відповідь1|Відповідь2|Відповідь3|НомерПравильної(0-2)"
     )
     try:
         response = await model.generate_content_async(sys_prompt)
@@ -46,15 +46,34 @@ async def generate_quiz_data(topic, prompt_text):
         return None
 
 async def generate_ai_text(topic, prompt_text, platform, has_photo):
-    """Генерація тексту"""
+    """Генерація тексту з ЖОРСТКИМ лімітом"""
     try:
-        limit = "900 символів" if has_photo else "3500 символів"
+        # ЛІМІТИ (Щоб не було помилок Telegram)
+        if has_photo:
+            char_limit = 950  # Підпис під фото (max 1024)
+            type_desc = "Короткий пост під фото"
+        else:
+            char_limit = 3800 # Текстове повідомлення (max 4096)
+            type_desc = "Лонгрід (стаття)"
+
         sys_prompt = (
-            f"Напиши пост для {platform}. Тема: {topic}. Деталі: {prompt_text}. "
-            f"Мова: Українська. Без Markdown. Ліміт: {limit}."
+            f"Ти — автор каналу Data Nata. Напиши пост для {platform}. "
+            f"Тема: {topic}. Деталі: {prompt_text}. "
+            f"Мова: Українська. "
+            f"Вимоги: "
+            f"1. {type_desc}. "
+            f"2. Максимальна довжина — {char_limit} символів. Це критично! "
+            f"3. Без Markdown (зірочок, решіток). Тільки текст і емодзі."
         )
+        
         response = await model.generate_content_async(sys_prompt)
-        return response.text.replace("**", "").replace("__", "").replace("```", "").strip()
+        text = response.text.replace("**", "").replace("__", "").replace("```", "").strip()
+        
+        # ЗАПОБІЖНИК: Обрізаємо, якщо AI написав більше
+        if len(text) > char_limit:
+            text = text[:char_limit] + "..."
+            
+        return text
     except Exception as e:
         return f"Помилка AI: {str(e)}"
 
@@ -82,7 +101,6 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Запит (БЕЗ перевірки status)
         if platform == 'tg':
             cursor.execute(f"SELECT topic, ai_prompt, photo_query, quiz_data FROM {table_name} WHERE day = %s", (day_now,))
         else:
@@ -96,17 +114,16 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
             photo_query = row[2]
             quiz_data = row[3] if platform == 'tg' and row[3] else None
             
-            # Тип контенту
             is_quiz = (platform == 'tg' and photo_query is None and "квіз" in topic.lower())
             has_photo = photo_query is not None
             
             if from_command:
-                await bot.send_message(ADMIN_ID, f"👩‍💻 {platform}: День {day_now} — {topic}...")
+                await bot.send_message(ADMIN_ID, f"👩‍💻 {platform}: Генерую '{topic}'...")
 
-            # 1. Генеруємо текст
+            # 1. Генерація тексту
             generated_text = await generate_ai_text(topic, ai_prompt, platform, has_photo)
             
-            # 2. Якщо це Квіз і даних немає - генеруємо і пишемо в базу
+            # 2. Генерація квізу (якщо треба)
             if is_quiz and not quiz_data:
                 quiz_data = await generate_quiz_data(topic, ai_prompt)
                 cursor.execute(f"UPDATE {table_name} SET quiz_data = %s WHERE day = %s", (quiz_data, day_now))
@@ -118,19 +135,22 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 [InlineKeyboardButton(text="📝 Переписати", callback_data=f"txt_{platform}_{day_now}")]
             ])
 
-            # ВІДПРАВКА АДМІНУ
+            # ВІДПРАВКА АДМІНУ (З урахуванням лімітів)
             if is_quiz and quiz_data:
                 p = quiz_data.split("|")
-                await bot.send_message(ADMIN_ID, f"🧠 Завдання:\n{generated_text}")
+                # Квіз: Текст + Опитування
+                await bot.send_message(ADMIN_ID, f"🧠 Завдання:\n{generated_text[:4000]}")
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
                 photo_url = await get_photo_url(photo_query)
                 keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
-                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text[:1024], reply_markup=keyboard)
+                # Фото: Підпис обрізаємо до 1000
+                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text[:1000], reply_markup=keyboard)
 
             else: # Тільки текст
-                await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
+                # Текст: Обрізаємо до 4000
+                await bot.send_message(ADMIN_ID, generated_text[:4000], reply_markup=keyboard)
 
         else:
             if from_command:
@@ -148,7 +168,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online")
+        await message.answer("👋 Bot Online (Final Config)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -172,11 +192,11 @@ async def cb_publish(callback: types.CallbackQuery):
         text_to_publish = text_to_publish.replace("🧠 Завдання:\n", "")
     
     if platform == 'tg':
-        # Публікуємо фото або текст
+        # Публікуємо фото або текст (З повторною перевіркою лімітів)
         if callback.message.photo:
-            await bot.send_photo(CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=text_to_publish)
+            await bot.send_photo(CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=text_to_publish[:1024])
         elif text_to_publish:
-             await bot.send_message(CHANNEL_ID, text_to_publish)
+             await bot.send_message(CHANNEL_ID, text_to_publish[:4096])
         
         # Якщо є квіз - публікуємо полл
         conn = get_db_connection()
@@ -192,7 +212,6 @@ async def cb_publish(callback: types.CallbackQuery):
     else:
         msg = "✅ ЗАТВЕРДЖЕНО (Інста)"
 
-    # Тут ми НЕ оновлюємо статус, бо ти просила прибрати це
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(msg)
@@ -233,9 +252,9 @@ async def cb_txt(callback: types.CallbackQuery):
         new_text = await generate_ai_text(topic, prompt, platform, has_photo)
         
         if callback.message.caption:
-            await callback.message.edit_caption(caption=new_text[:1024], reply_markup=callback.message.reply_markup)
+            await callback.message.edit_caption(caption=new_text[:1000], reply_markup=callback.message.reply_markup)
         else:
-            await callback.message.edit_text(text=new_text, reply_markup=callback.message.reply_markup)
+            await callback.message.edit_text(text=new_text[:4000], reply_markup=callback.message.reply_markup)
 
 # --- SERVER ---
 async def handle(request): return web.Response(text="Bot is Alive")
@@ -247,6 +266,7 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     
+    # 2. ВИПРАВЛЕНО ЧАС (Інстаграм на 9:10)
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
     scheduler.add_job(prepare_draft, 'cron', hour=9, minute=0, args=['tg'])
     scheduler.add_job(prepare_draft, 'cron', hour=9, minute=10, args=['inst'])
