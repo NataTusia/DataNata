@@ -10,11 +10,11 @@ import urllib.parse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-# Додали BufferedInputFile для відправки файлів напряму
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BufferedInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАЛАШТУВАННЯ ---
+# .strip() - це магія, яка видаляє випадкові пробіли, що вбивають бота
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
@@ -29,6 +29,9 @@ model = genai.GenerativeModel('gemini-flash-latest')
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --- СТАБІЛЬНЕ ЗАПАСНЕ ФОТО ---
+FALLBACK_PHOTO = "https://images.unsplash.com/photo-1542831371-29b0f74f9713?auto=format&fit=crop&w=1000&q=80"
+
 # --- ФУНКЦІЇ ---
 
 def get_db_connection():
@@ -37,7 +40,7 @@ def get_db_connection():
 async def generate_quiz_data(topic, prompt_text):
     sys_prompt = (
         f"Створи квіз для Telegram. Тема: {topic}. Контекст: {prompt_text}. "
-        f"Формат суворо такий: Питання?|Відповідь1|Відповідь2|Відповідь3|НомерПравильної(0-2)"
+        f"Формат: Питання?|Відповідь1|Відповідь2|Відповідь3|НомерПравильної(0-2)"
     )
     try:
         response = await model.generate_content_async(sys_prompt)
@@ -77,11 +80,16 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
     except Exception as e:
         return f"Помилка AI: {str(e)}"
 
-# Отримує просто рядок URL (як було раніше)
-async def get_photo_url_string(query):
-    if not query: return "[https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop](https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop)"
+# --- ПРОСТА ЛОГІКА ОТРИМАННЯ URL (ЯК В KIDSLAND) ---
+async def get_photo_url(query):
+    # Якщо ключа немає або запит пустий - віддаємо заглушку
+    if not query or not UNSPLASH_KEY: 
+        return FALLBACK_PHOTO
     
+    # Кодуємо пробіли (dark mode -> dark%20mode)
     clean_query = urllib.parse.quote(query.strip())
+    
+    # Формуємо URL
     api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     
     try:
@@ -89,24 +97,16 @@ async def get_photo_url_string(query):
             async with session.get(api_url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data['urls']['regular']
-    except:
-        pass
-    return "[https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop](https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop)"
-
-# НОВА ФУНКЦІЯ: Скачує картинку і робить з неї файл для Телеграму
-async def download_image_as_file(url):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    # Читаємо байти картинки
-                    data = await resp.read()
-                    # Запаковуємо у спеціальний об'єкт для aiogram
-                    return BufferedInputFile(data, filename="image.jpg")
+                    raw_url = data['urls']['regular']
+                    # Важливо: чистимо результат від пробілів
+                    return raw_url.strip()
+                else:
+                    logging.error(f"Unsplash API Error: {resp.status}")
     except Exception as e:
-        logging.error(f"Download Error: {e}")
-    return None
+        logging.error(f"Unsplash Exception: {e}")
+
+    # Якщо будь-яка помилка - повертаємо стабільне фото
+    return FALLBACK_PHOTO
 
 # --- ОСНОВНА ЛОГІКА ---
 
@@ -156,20 +156,12 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
-                # 1. Отримуємо посилання (яке може бути "глючним" для телеграму)
-                url_string = await get_photo_url_string(photo_query)
-                
-                # 2. Скачуємо його самі (щоб виправити помилку порту)
-                photo_file = await download_image_as_file(url_string)
-                
+                # Отримуємо просте посилання (або Fallback)
+                photo_url = await get_photo_url(photo_query)
                 keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
                 
-                if photo_file:
-                    # Відправляємо ФАЙЛ
-                    await bot.send_photo(chat_id=ADMIN_ID, photo=photo_file, caption=generated_text, reply_markup=keyboard)
-                else:
-                    # Якщо не скачалось, пробуємо старий метод (на удачу)
-                    await bot.send_photo(chat_id=ADMIN_ID, photo=url_string, caption=generated_text, reply_markup=keyboard)
+                # Відправляємо URL
+                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
 
             else: 
                 await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
@@ -190,7 +182,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (Files Mode)")
+        await message.answer("👋 Bot Online (Classic Mode)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -215,12 +207,9 @@ async def cb_publish(callback: types.CallbackQuery):
         
         if platform == 'tg':
             if callback.message.photo:
-                # ТУТ ВАЖЛИВО: Ми не скачуємо заново. 
-                # Ми беремо ID файлу, який ВЖЕ завантажено в чат з адміном.
-                # Це працює миттєво і без помилок URL.
+                # Використовуємо file_id, це надійно
                 file_id = callback.message.photo[-1].file_id
                 await bot.send_photo(CHANNEL_ID, photo=file_id, caption=text_to_publish[:1000])
-            
             elif text_to_publish:
                 await bot.send_message(CHANNEL_ID, text_to_publish[:4000])
             
@@ -243,7 +232,7 @@ async def cb_publish(callback: types.CallbackQuery):
     except Exception as e:
         await callback.answer(f"❌ ПОМИЛКА: {str(e)}", show_alert=True)
 
-# ЗМІНА ФОТО (теж через скачування)
+# ЗМІНА ФОТО (URL method)
 @dp.callback_query(F.data.startswith("pic_"))
 async def cb_pic(callback: types.CallbackQuery):
     try:
@@ -258,19 +247,9 @@ async def cb_pic(callback: types.CallbackQuery):
         conn.close()
         
         if row and row[0]:
-            # 1. Нове посилання
-            new_url = await get_photo_url_string(row[0])
-            
-            # 2. Скачуємо
-            photo_file = await download_image_as_file(new_url)
-            
-            if photo_file:
-                media = InputMediaPhoto(media=photo_file, caption=callback.message.caption)
-                await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
-            else:
-                # Fallback
-                media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
-                await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
+            new_url = await get_photo_url(row[0])
+            media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
+            await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
     except Exception as e:
         await callback.answer(f"Err: {e}", show_alert=True)
 
