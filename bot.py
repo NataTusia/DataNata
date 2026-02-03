@@ -14,7 +14,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАЛАШТУВАННЯ ---
-# .strip() критично важливий, щоб видалити пробіли з ключів
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
@@ -47,9 +46,8 @@ async def generate_quiz_data(topic, prompt_text):
 
 async def generate_ai_text(topic, prompt_text, platform, has_photo):
     try:
-        # Логіка тегів і лімітів
         if platform == 'inst':
-            tags_instruction = "В кінці додай блок популярних хештегів (#python #coding...)."
+            tags_instruction = "В кінці додай хештеги (#python #coding...)."
             char_limit = 950
             type_desc = "Цікавий пост для Instagram."
         else:
@@ -85,14 +83,13 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
     except Exception as e:
         return f"Помилка AI: {str(e)}"
 
-# --- ОТРИМАННЯ ФОТО (Чистий Unsplash) ---
-async def get_photo_url(query):
-    if not query: query = "technology" # Дефолтний запит якщо в базі пусто
-    
-    # 1. Кодуємо запит (dark mode -> dark%20mode) - ЦЕ ВАЖЛИВО
+# --- ОТРИМАННЯ ФОТО (ДІАГНОСТИКА) ---
+# Ця функція повертає ТУПЛ: (url, error_message)
+async def get_photo_url_debug(query):
+    if not query: query = "technology"
     clean_query = urllib.parse.quote(query.strip())
     
-    # 2. Формуємо URL
+    # URL Unsplash
     api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     
     try:
@@ -101,14 +98,13 @@ async def get_photo_url(query):
                 if resp.status == 200:
                     data = await resp.json()
                     raw_url = data['urls']['regular']
-                    # 3. Повертаємо чисте посилання
-                    return raw_url.strip()
+                    return raw_url.strip(), None # Успіх, помилки немає
                 else:
-                    logging.error(f"Unsplash Error: {resp.status}")
-                    return None # Повертаємо нічого, щоб бот повідомив про помилку
+                    # Читаємо, що саме відповіли сервери Unsplash
+                    error_text = await resp.text()
+                    return None, f"Status {resp.status}: {error_text}"
     except Exception as e:
-        logging.error(f"Unsplash Connection Error: {e}")
-        return None
+        return None, f"Connection Error: {str(e)}"
 
 # --- ОСНОВНА ЛОГІКА ---
 
@@ -158,23 +154,23 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
-                # Пробуємо отримати фото
-                photo_url = await get_photo_url(photo_query)
+                # ВИКЛИКАЄМО ДІАГНОСТИКУ
+                photo_url, error_msg = await get_photo_url_debug(photo_query)
                 
                 if photo_url:
+                    # Все ок, додаємо кнопку "Інше фото"
                     keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
                     await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
                 else:
-                    # Якщо Unsplash не відповів (помилка ключа або лімітів)
-                    # МИ НЕ ВІДПРАВЛЯЄМО КРИВЕ ПОСИЛАННЯ. Ми кажемо правду.
-                    error_msg = (
-                        f"⚠️ **Помилка Unsplash**\n"
-                        f"Не вдалося знайти фото за запитом: `{photo_query}`.\n"
-                        f"1. Перевір API ключ (чи немає пробілів).\n"
-                        f"2. Перевір ліміти (50 запитів/год).\n\n"
-                        f"Текст посту:\n{generated_text}"
+                    # ПОМИЛКА! Показуємо її тобі
+                    debug_info = (
+                        f"⚠️ **УВАГА: Unsplash не працює!**\n\n"
+                        f"Запит: `{photo_query}`\n"
+                        f"Помилка: `{error_msg}`\n\n"
+                        f"*(Перевір свій ключ UNSPLASH_ACCESS_KEY на хостингу)*\n\n"
+                        f"👇 Ось текст посту:"
                     )
-                    await bot.send_message(ADMIN_ID, error_msg, parse_mode="Markdown", reply_markup=keyboard)
+                    await bot.send_message(ADMIN_ID, f"{debug_info}\n\n{generated_text}", parse_mode="Markdown", reply_markup=keyboard)
 
             else: 
                 await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
@@ -195,7 +191,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (Clean Unsplash)")
+        await message.answer("👋 Bot Online (Debug Mode)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -216,11 +212,16 @@ async def cb_publish(callback: types.CallbackQuery):
         
         text_to_publish = callback.message.caption if callback.message.caption else callback.message.text
         if text_to_publish:
+            # Чистимо текст від діагностичних повідомлень
             text_to_publish = text_to_publish.replace("🧠 Завдання:\n", "")
-        
+            if "⚠️ **УВАГА: Unsplash не працює!**" in text_to_publish:
+                 # Якщо публікуємо попри помилку, беремо тільки текст посту (він знизу)
+                 parts = text_to_publish.split("👇 Ось текст посту:")
+                 if len(parts) > 1:
+                     text_to_publish = parts[1].strip()
+
         if platform == 'tg':
             if callback.message.photo:
-                # Відправляємо ID файлу (надійно)
                 file_id = callback.message.photo[-1].file_id
                 await bot.send_photo(CHANNEL_ID, photo=file_id, caption=text_to_publish[:1000])
             elif text_to_publish:
@@ -245,7 +246,7 @@ async def cb_publish(callback: types.CallbackQuery):
     except Exception as e:
         await callback.answer(f"❌ ПОМИЛКА: {str(e)}", show_alert=True)
 
-# ЗМІНА ФОТО (Тільки Unsplash)
+# ЗМІНА ФОТО
 @dp.callback_query(F.data.startswith("pic_"))
 async def cb_pic(callback: types.CallbackQuery):
     try:
@@ -260,18 +261,18 @@ async def cb_pic(callback: types.CallbackQuery):
         conn.close()
         
         if row and row[0]:
-            new_url = await get_photo_url(row[0])
+            new_url, error = await get_photo_url_debug(row[0])
             
             if new_url:
                 media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
                 await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
             else:
-                await callback.answer("⚠️ Помилка Unsplash (немає URL)", show_alert=True)
+                await callback.answer(f"Error: {error}", show_alert=True)
                 
     except Exception as e:
         await callback.answer(f"Err: {e}", show_alert=True)
 
-# ТЕКСТ (без змін)
+# ТЕКСТ
 @dp.callback_query(F.data.startswith("txt_"))
 async def cb_txt(callback: types.CallbackQuery):
     _, platform, day_str = callback.data.split("_")
