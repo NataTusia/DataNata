@@ -6,7 +6,7 @@ import time
 import psycopg2
 import google.generativeai as genai
 import aiohttp
-import urllib.parse # Додали для кодування URL
+import urllib.parse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,11 +14,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАЛАШТУВАННЯ ---
+# .strip() видаляє пробіли на початку і в кінці змінних середовища
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-# Чистимо ключ від пробілів, щоб не ламав URL
 UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 PORT = int(os.environ.get("PORT", 8080))
@@ -35,10 +35,9 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 async def generate_quiz_data(topic, prompt_text):
-    """Генерація квізу"""
     sys_prompt = (
         f"Створи квіз для Telegram. Тема: {topic}. Контекст: {prompt_text}. "
-        f"Формат суворо такий: Питання?|Відповідь1|Відповідь2|Відповідь3|НомерПравильної(0-2)"
+        f"Формат: Питання?|Відповідь1|Відповідь2|Відповідь3|НомерПравильної(0-2)"
     )
     try:
         response = await model.generate_content_async(sys_prompt)
@@ -47,14 +46,13 @@ async def generate_quiz_data(topic, prompt_text):
         return None
 
 async def generate_ai_text(topic, prompt_text, platform, has_photo):
-    """Генерація тексту"""
     try:
         if has_photo:
             char_limit = 950   
             type_desc = "Змістовний, цікавий пост під фото"
         else:
             char_limit = 1500  
-            type_desc = "Лаконічний пост. Одна головна думка."
+            type_desc = "Лаконічний пост."
 
         sys_prompt = (
             f"Ти — Data Nata. Пишеш для {platform}. "
@@ -63,9 +61,8 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
             f"Вимоги: "
             f"1. {type_desc}. "
             f"2. Максимальний ліміт — {char_limit} символів. "
-            f"3. Пиши живою мовою, з емодзі. "
-            f"4. Без Markdown (зірочок). Тільки чистий текст. "
-            f"5. В кінці посту додай ОДИН тег: #theory, #quiz, #lifehack або #start."
+            f"3. Без Markdown (зірочок). "
+            f"4. В кінці додай ОДИН тег: #theory, #quiz, #lifehack або #start."
         )
         
         response = await model.generate_content_async(sys_prompt)
@@ -82,11 +79,14 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
         return f"Помилка AI: {str(e)}"
 
 async def get_photo_url(query):
-    # ЗАХИСТ URL: Кодуємо запит (наприклад "dark mode" -> "dark%20mode")
-    if not query: return None
-    clean_query = urllib.parse.quote(query)
+    # 1. Якщо запиту немає - стандартне фото
+    if not query: 
+        return "[https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop](https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop)"
     
-    # Формуємо URL для API
+    # 2. Чистимо запит для URL (пробіли -> %20)
+    clean_query = urllib.parse.quote(query.strip())
+    
+    # 3. Формуємо URL до API
     api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     
     try:
@@ -94,14 +94,16 @@ async def get_photo_url(query):
             async with session.get(api_url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data['urls']['regular']
+                    raw_url = data['urls']['regular']
+                    # 4. ГОЛОВНЕ ВИПРАВЛЕННЯ: Чистимо результат від пробілів
+                    return raw_url.strip()
                 else:
-                    logging.error(f"Unsplash Error {resp.status}: {await resp.text()}")
+                    logging.error(f"Unsplash Error: {await resp.text()}")
     except Exception as e:
         logging.error(f"Unsplash Exception: {e}")
 
-    # Запасне фото (стабільне посилання)
-    return "[https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=1000&q=80](https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=1000&q=80)"
+    # Fallback (запасне фото), теж чисте
+    return "[https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop](https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1000&auto=format&fit=crop)"
 
 # --- ОСНОВНА ЛОГІКА ---
 
@@ -151,8 +153,11 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
+                # Отримуємо чистий URL
                 photo_url = await get_photo_url(photo_query)
                 keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
+                
+                # Відправляємо URL (як раніше)
                 await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
 
             else: 
@@ -174,7 +179,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (URL Fix)")
+        await message.answer("👋 Bot Online (Clean URL Fix)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -199,10 +204,10 @@ async def cb_publish(callback: types.CallbackQuery):
         
         if platform == 'tg':
             if callback.message.photo:
-                # Ліміт 1000 для підпису
-                await bot.send_photo(CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=text_to_publish[:1000])
+                # Беремо ID файлу (швидко і надійно)
+                file_id = callback.message.photo[-1].file_id
+                await bot.send_photo(CHANNEL_ID, photo=file_id, caption=text_to_publish[:1000])
             elif text_to_publish:
-                # Ліміт 4000 для тексту
                 await bot.send_message(CHANNEL_ID, text_to_publish[:4000])
             
             conn = get_db_connection()
@@ -226,20 +231,24 @@ async def cb_publish(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("pic_"))
 async def cb_pic(callback: types.CallbackQuery):
-    _, platform, day_str = callback.data.split("_")
-    day_num = int(day_str)
-    table_name = "instagram_plan" if platform == 'inst' else "telegram_plan"
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT photo_query FROM {table_name} WHERE day = %s", (day_num,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row and row[0]:
-        url = await get_photo_url(row[0])
-        media = InputMediaPhoto(media=url, caption=callback.message.caption)
-        await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
+    try:
+        _, platform, day_str = callback.data.split("_")
+        day_num = int(day_str)
+        table_name = "instagram_plan" if platform == 'inst' else "telegram_plan"
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT photo_query FROM {table_name} WHERE day = %s", (day_num,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row[0]:
+            # Отримуємо новий ЧИСТИЙ url
+            new_url = await get_photo_url(row[0])
+            media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
+            await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
+    except Exception as e:
+        await callback.answer(f"Err: {e}", show_alert=True)
 
 @dp.callback_query(F.data.startswith("txt_"))
 async def cb_txt(callback: types.CallbackQuery):
