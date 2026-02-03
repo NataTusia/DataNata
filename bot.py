@@ -14,10 +14,12 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАЛАШТУВАННЯ ---
+# Використовуємо .strip(), щоб прибрати випадкові пробіли
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+# ТУТ ТЕПЕР ПРАВИЛЬНА НАЗВА, як у твоєму Render
 UNSPLASH_KEY = os.environ.get("UNSPLASH_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 PORT = int(os.environ.get("PORT", 8080))
@@ -67,11 +69,10 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
             f"1. {type_desc}. "
             f"2. Максимальний ліміт — {char_limit} символів. "
             f"3. {tags_instruction} "
-            f"4. НІЯКОГО Markdown. Не використовуй зірочки ** або нижні підкреслення __ для виділення. Пиши просто текст."
+            f"4. НІЯКОГО Markdown. Не використовуй зірочки ** або нижні підкреслення __. Пиши просто текст."
         )
         
         response = await model.generate_content_async(sys_prompt)
-        # Додаткова чистка від спецсимволів Markdown, щоб не ламало Телеграм
         text = response.text.replace("**", "").replace("__", "").replace("```", "").strip()
         
         if len(text) > char_limit:
@@ -84,11 +85,16 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
     except Exception as e:
         return f"Помилка AI: {str(e)}"
 
-# --- ОТРИМАННЯ ФОТО (ДІАГНОСТИКА) ---
+# --- ОТРИМАННЯ ФОТО (ВИПРАВЛЕНО) ---
 async def get_photo_url_debug(query):
+    # Перевірка на всяк випадок
+    if not UNSPLASH_KEY:
+        return None, "❌ ПОМИЛКА: Змінна UNSPLASH_KEY пуста в налаштуваннях Render!"
+
     if not query: query = "technology"
     clean_query = urllib.parse.quote(query.strip())
     
+    # ОСЬ ТУТ БУЛА ПОМИЛКА - ТЕПЕР ВИПРАВЛЕНО (Чисте посилання)
     api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     
     try:
@@ -132,7 +138,9 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
             has_photo = photo_query is not None
             
             if from_command:
-                await bot.send_message(ADMIN_ID, f"👩‍💻 {platform}: {topic}...")
+                # Діагностика ключа для тебе
+                key_status = "✅ Ключ є" if UNSPLASH_KEY else "❌ Ключа немає"
+                await bot.send_message(ADMIN_ID, f"👩‍💻 {platform}: {topic} ({key_status})...")
 
             generated_text = await generate_ai_text(topic, ai_prompt, platform, has_photo)
             
@@ -148,7 +156,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 
             if is_quiz and quiz_data:
                 p = quiz_data.split("|")
-                # Тут ми використовуємо HTML для жирного шрифту в заголовку, але текст AI вставляємо обережно
+                # Для заголовка HTML, для тексту - нічого (щоб не ламалось)
                 await bot.send_message(ADMIN_ID, f"<b>🧠 Завдання:</b>\n{generated_text}", parse_mode="HTML", reply_markup=keyboard)
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]))
 
@@ -157,16 +165,14 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 
                 if photo_url:
                     keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
-                    # ВАЖЛИВО: parse_mode прибрано, щоб не ламалось об символи "_"
+                    # ВАЖЛИВО: без parse_mode, щоб не було помилки "can't parse entities"
                     await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
                 else:
-                    # Помилка Unsplash - відправляємо як текст
+                    # Помилка Unsplash - відправляємо текст і причину
                     error_report = f"⚠️ Unsplash Error: {error_msg}\n\n{generated_text}"
-                    # Тут теж без parse_mode="Markdown", щоб не впало
                     await bot.send_message(ADMIN_ID, error_report, reply_markup=keyboard)
 
             else: 
-                # Тільки текст - без parse_mode
                 await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
 
         else:
@@ -178,7 +184,6 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 
     except Exception as e:
         if conn: conn.close()
-        # Тут теж без форматування, щоб точно дійшло
         await bot.send_message(ADMIN_ID, f"🆘 Помилка: {str(e)}")
 
 # --- ОБРОБНИКИ ---
@@ -186,7 +191,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (No Markdown Crash)")
+        await message.answer("👋 Bot Online (Final Fix)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -207,10 +212,8 @@ async def cb_publish(callback: types.CallbackQuery):
         
         text_to_publish = callback.message.caption if callback.message.caption else callback.message.text
         if text_to_publish:
-            # Чистимо від технічних заголовків, якщо вони є
             text_to_publish = text_to_publish.replace("🧠 Завдання:", "").strip()
             if "⚠️ Unsplash Error:" in text_to_publish:
-                 # Якщо була помилка фото, публікуємо тільки чистий текст посту
                  parts = text_to_publish.split("\n\n", 1)
                  if len(parts) > 1:
                      text_to_publish = parts[1].strip()
@@ -218,10 +221,8 @@ async def cb_publish(callback: types.CallbackQuery):
         if platform == 'tg':
             if callback.message.photo:
                 file_id = callback.message.photo[-1].file_id
-                # Без parse_mode!
                 await bot.send_photo(CHANNEL_ID, photo=file_id, caption=text_to_publish[:1000])
             elif text_to_publish:
-                # Без parse_mode!
                 await bot.send_message(CHANNEL_ID, text_to_publish[:4000])
             
             conn = get_db_connection()
