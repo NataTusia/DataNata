@@ -18,7 +18,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
+UNSPLASH_KEY = os.environ.get("UNSPLASH_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 PORT = int(os.environ.get("PORT", 8080))
 
