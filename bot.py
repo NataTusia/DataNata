@@ -14,7 +14,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАЛАШТУВАННЯ ---
-# .strip() - це магія, яка видаляє випадкові пробіли, що вбивають бота
+# .strip() критично важливий, щоб видалити пробіли з ключів
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
@@ -28,9 +28,6 @@ model = genai.GenerativeModel('gemini-flash-latest')
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# --- СТАБІЛЬНЕ ЗАПАСНЕ ФОТО ---
-FALLBACK_PHOTO = "https://images.unsplash.com/photo-1542831371-29b0f74f9713?auto=format&fit=crop&w=1000&q=80"
 
 # --- ФУНКЦІЇ ---
 
@@ -50,12 +47,19 @@ async def generate_quiz_data(topic, prompt_text):
 
 async def generate_ai_text(topic, prompt_text, platform, has_photo):
     try:
-        if has_photo:
-            char_limit = 950   
-            type_desc = "Змістовний, цікавий пост під фото"
+        # Логіка тегів і лімітів
+        if platform == 'inst':
+            tags_instruction = "В кінці додай блок популярних хештегів (#python #coding...)."
+            char_limit = 950
+            type_desc = "Цікавий пост для Instagram."
         else:
-            char_limit = 1500  
-            type_desc = "Лаконічний пост."
+            tags_instruction = "В кінці додай ОДИН тег: #theory, #quiz або #lifehack."
+            if has_photo:
+                char_limit = 950
+                type_desc = "Корисний пост під фото."
+            else:
+                char_limit = 1500
+                type_desc = "Лаконічний пост."
 
         sys_prompt = (
             f"Ти — Data Nata. Пишеш для {platform}. "
@@ -64,7 +68,8 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
             f"Вимоги: "
             f"1. {type_desc}. "
             f"2. Максимальний ліміт — {char_limit} символів. "
-            f"3. В кінці додай ОДИН тег: #theory, #quiz, #lifehack або #start."
+            f"3. {tags_instruction} "
+            f"4. Без Markdown. Тільки чистий текст."
         )
         
         response = await model.generate_content_async(sys_prompt)
@@ -80,16 +85,14 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
     except Exception as e:
         return f"Помилка AI: {str(e)}"
 
-# --- ПРОСТА ЛОГІКА ОТРИМАННЯ URL (ЯК В KIDSLAND) ---
+# --- ОТРИМАННЯ ФОТО (Чистий Unsplash) ---
 async def get_photo_url(query):
-    # Якщо ключа немає або запит пустий - віддаємо заглушку
-    if not query or not UNSPLASH_KEY: 
-        return FALLBACK_PHOTO
+    if not query: query = "technology" # Дефолтний запит якщо в базі пусто
     
-    # Кодуємо пробіли (dark mode -> dark%20mode)
+    # 1. Кодуємо запит (dark mode -> dark%20mode) - ЦЕ ВАЖЛИВО
     clean_query = urllib.parse.quote(query.strip())
     
-    # Формуємо URL
+    # 2. Формуємо URL
     api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     
     try:
@@ -98,15 +101,14 @@ async def get_photo_url(query):
                 if resp.status == 200:
                     data = await resp.json()
                     raw_url = data['urls']['regular']
-                    # Важливо: чистимо результат від пробілів
+                    # 3. Повертаємо чисте посилання
                     return raw_url.strip()
                 else:
-                    logging.error(f"Unsplash API Error: {resp.status}")
+                    logging.error(f"Unsplash Error: {resp.status}")
+                    return None # Повертаємо нічого, щоб бот повідомив про помилку
     except Exception as e:
-        logging.error(f"Unsplash Exception: {e}")
-
-    # Якщо будь-яка помилка - повертаємо стабільне фото
-    return FALLBACK_PHOTO
+        logging.error(f"Unsplash Connection Error: {e}")
+        return None
 
 # --- ОСНОВНА ЛОГІКА ---
 
@@ -156,12 +158,23 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
-                # Отримуємо просте посилання (або Fallback)
+                # Пробуємо отримати фото
                 photo_url = await get_photo_url(photo_query)
-                keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
                 
-                # Відправляємо URL
-                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
+                if photo_url:
+                    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
+                    await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
+                else:
+                    # Якщо Unsplash не відповів (помилка ключа або лімітів)
+                    # МИ НЕ ВІДПРАВЛЯЄМО КРИВЕ ПОСИЛАННЯ. Ми кажемо правду.
+                    error_msg = (
+                        f"⚠️ **Помилка Unsplash**\n"
+                        f"Не вдалося знайти фото за запитом: `{photo_query}`.\n"
+                        f"1. Перевір API ключ (чи немає пробілів).\n"
+                        f"2. Перевір ліміти (50 запитів/год).\n\n"
+                        f"Текст посту:\n{generated_text}"
+                    )
+                    await bot.send_message(ADMIN_ID, error_msg, parse_mode="Markdown", reply_markup=keyboard)
 
             else: 
                 await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
@@ -182,7 +195,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (Classic Mode)")
+        await message.answer("👋 Bot Online (Clean Unsplash)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -207,7 +220,7 @@ async def cb_publish(callback: types.CallbackQuery):
         
         if platform == 'tg':
             if callback.message.photo:
-                # Використовуємо file_id, це надійно
+                # Відправляємо ID файлу (надійно)
                 file_id = callback.message.photo[-1].file_id
                 await bot.send_photo(CHANNEL_ID, photo=file_id, caption=text_to_publish[:1000])
             elif text_to_publish:
@@ -232,7 +245,7 @@ async def cb_publish(callback: types.CallbackQuery):
     except Exception as e:
         await callback.answer(f"❌ ПОМИЛКА: {str(e)}", show_alert=True)
 
-# ЗМІНА ФОТО (URL method)
+# ЗМІНА ФОТО (Тільки Unsplash)
 @dp.callback_query(F.data.startswith("pic_"))
 async def cb_pic(callback: types.CallbackQuery):
     try:
@@ -248,8 +261,13 @@ async def cb_pic(callback: types.CallbackQuery):
         
         if row and row[0]:
             new_url = await get_photo_url(row[0])
-            media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
-            await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
+            
+            if new_url:
+                media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
+                await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
+            else:
+                await callback.answer("⚠️ Помилка Unsplash (немає URL)", show_alert=True)
+                
     except Exception as e:
         await callback.answer(f"Err: {e}", show_alert=True)
 
