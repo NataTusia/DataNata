@@ -23,7 +23,7 @@ PORT = int(os.environ.get("PORT", 8080))
 
 # AI Config
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash-latest')
+model = genai.GenerativeModel('gemini-flash-latest')
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
