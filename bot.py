@@ -67,10 +67,11 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
             f"1. {type_desc}. "
             f"2. Максимальний ліміт — {char_limit} символів. "
             f"3. {tags_instruction} "
-            f"4. Без Markdown. Тільки чистий текст."
+            f"4. НІЯКОГО Markdown. Не використовуй зірочки ** або нижні підкреслення __ для виділення. Пиши просто текст."
         )
         
         response = await model.generate_content_async(sys_prompt)
+        # Додаткова чистка від спецсимволів Markdown, щоб не ламало Телеграм
         text = response.text.replace("**", "").replace("__", "").replace("```", "").strip()
         
         if len(text) > char_limit:
@@ -84,12 +85,10 @@ async def generate_ai_text(topic, prompt_text, platform, has_photo):
         return f"Помилка AI: {str(e)}"
 
 # --- ОТРИМАННЯ ФОТО (ДІАГНОСТИКА) ---
-# Ця функція повертає ТУПЛ: (url, error_message)
 async def get_photo_url_debug(query):
     if not query: query = "technology"
     clean_query = urllib.parse.quote(query.strip())
     
-    # URL Unsplash
     api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     
     try:
@@ -98,9 +97,8 @@ async def get_photo_url_debug(query):
                 if resp.status == 200:
                     data = await resp.json()
                     raw_url = data['urls']['regular']
-                    return raw_url.strip(), None # Успіх, помилки немає
+                    return raw_url.strip(), None
                 else:
-                    # Читаємо, що саме відповіли сервери Unsplash
                     error_text = await resp.text()
                     return None, f"Status {resp.status}: {error_text}"
     except Exception as e:
@@ -150,29 +148,25 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 
             if is_quiz and quiz_data:
                 p = quiz_data.split("|")
-                await bot.send_message(ADMIN_ID, f"🧠 Завдання:\n{generated_text}")
-                await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
+                # Тут ми використовуємо HTML для жирного шрифту в заголовку, але текст AI вставляємо обережно
+                await bot.send_message(ADMIN_ID, f"<b>🧠 Завдання:</b>\n{generated_text}", parse_mode="HTML", reply_markup=keyboard)
+                await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]))
 
             elif has_photo:
-                # ВИКЛИКАЄМО ДІАГНОСТИКУ
                 photo_url, error_msg = await get_photo_url_debug(photo_query)
                 
                 if photo_url:
-                    # Все ок, додаємо кнопку "Інше фото"
                     keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
+                    # ВАЖЛИВО: parse_mode прибрано, щоб не ламалось об символи "_"
                     await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
                 else:
-                    # ПОМИЛКА! Показуємо її тобі
-                    debug_info = (
-                        f"⚠️ **УВАГА: Unsplash не працює!**\n\n"
-                        f"Запит: `{photo_query}`\n"
-                        f"Помилка: `{error_msg}`\n\n"
-                        f"*(Перевір свій ключ UNSPLASH_ACCESS_KEY на хостингу)*\n\n"
-                        f"👇 Ось текст посту:"
-                    )
-                    await bot.send_message(ADMIN_ID, f"{debug_info}\n\n{generated_text}", parse_mode="Markdown", reply_markup=keyboard)
+                    # Помилка Unsplash - відправляємо як текст
+                    error_report = f"⚠️ Unsplash Error: {error_msg}\n\n{generated_text}"
+                    # Тут теж без parse_mode="Markdown", щоб не впало
+                    await bot.send_message(ADMIN_ID, error_report, reply_markup=keyboard)
 
             else: 
+                # Тільки текст - без parse_mode
                 await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
 
         else:
@@ -184,14 +178,15 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 
     except Exception as e:
         if conn: conn.close()
-        await bot.send_message(ADMIN_ID, f"🆘 Помилка: {e}")
+        # Тут теж без форматування, щоб точно дійшло
+        await bot.send_message(ADMIN_ID, f"🆘 Помилка: {str(e)}")
 
 # --- ОБРОБНИКИ ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (Debug Mode)")
+        await message.answer("👋 Bot Online (No Markdown Crash)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -212,19 +207,21 @@ async def cb_publish(callback: types.CallbackQuery):
         
         text_to_publish = callback.message.caption if callback.message.caption else callback.message.text
         if text_to_publish:
-            # Чистимо текст від діагностичних повідомлень
-            text_to_publish = text_to_publish.replace("🧠 Завдання:\n", "")
-            if "⚠️ **УВАГА: Unsplash не працює!**" in text_to_publish:
-                 # Якщо публікуємо попри помилку, беремо тільки текст посту (він знизу)
-                 parts = text_to_publish.split("👇 Ось текст посту:")
+            # Чистимо від технічних заголовків, якщо вони є
+            text_to_publish = text_to_publish.replace("🧠 Завдання:", "").strip()
+            if "⚠️ Unsplash Error:" in text_to_publish:
+                 # Якщо була помилка фото, публікуємо тільки чистий текст посту
+                 parts = text_to_publish.split("\n\n", 1)
                  if len(parts) > 1:
                      text_to_publish = parts[1].strip()
 
         if platform == 'tg':
             if callback.message.photo:
                 file_id = callback.message.photo[-1].file_id
+                # Без parse_mode!
                 await bot.send_photo(CHANNEL_ID, photo=file_id, caption=text_to_publish[:1000])
             elif text_to_publish:
+                # Без parse_mode!
                 await bot.send_message(CHANNEL_ID, text_to_publish[:4000])
             
             conn = get_db_connection()
@@ -267,7 +264,7 @@ async def cb_pic(callback: types.CallbackQuery):
                 media = InputMediaPhoto(media=new_url, caption=callback.message.caption)
                 await callback.message.edit_media(media=media, reply_markup=callback.message.reply_markup)
             else:
-                await callback.answer(f"Error: {error}", show_alert=True)
+                await callback.answer(f"Unsplash Error: {error}", show_alert=True)
                 
     except Exception as e:
         await callback.answer(f"Err: {e}", show_alert=True)
