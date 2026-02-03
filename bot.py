@@ -45,41 +45,39 @@ async def generate_quiz_data(topic, prompt_text):
         return None
 
 async def generate_ai_text(topic, prompt_text, platform, has_photo):
-    """Генерація тексту з СУВОРИМ лімітом"""
+    """Генерація тексту (Оптимізовані ліміти)"""
     try:
-        # НОВІ СУВОРІ ЛІМІТИ
         if has_photo:
-            # Для підпису (Caption) ліміт ТГ = 1024.
-            # Ставимо 800, щоб точно влізло і не обрізалось.
-            char_limit = 800  
-            type_desc = "Дуже стислий пост під фото"
+            # ТЕЛЕГРАМ ЛІМІТ ДЛЯ ПІДПИСУ = 1024.
+            # Ставимо 980, щоб використати максимум, але мати мізерний запас.
+            char_limit = 980   
+            type_desc = "Змістовний, цікавий пост під фото"
         else:
-            # Для повідомлення (Message) ліміт ТГ = 4096.
-            # Ставимо 3000, щоб був запас на форматування і AI встиг завершити думку.
-            char_limit = 3000 
-            type_desc = "Інформативний пост (стаття)"
+            # ТЕЛЕГРАМ ЛІМІТ ДЛЯ ТЕКСТУ = 4096.
+            # Ставимо 1500, щоб це було легке мікро-навчання (один екран).
+            char_limit = 1500  
+            type_desc = "Лаконічний пост. Одна головна думка."
 
         sys_prompt = (
-            f"Ти — автор каналу Data Nata. Напиши пост для {platform}. "
+            f"Ти — Data Nata. Пишеш для {platform}. "
             f"Тема: {topic}. Деталі: {prompt_text}. "
             f"Мова: Українська. "
             f"Вимоги: "
             f"1. {type_desc}. "
-            f"2. Вкладись у {char_limit} символів. Це критично! Не пиши більше, бо текст обріжеться. "
-            f"3. Обов'язково зроби логічний висновок у кінці. "
-            f"4. Без Markdown (зірочок, решіток). Тільки текст і емодзі."
+            f"2. Максимальний ліміт — {char_limit} символів. Намагайся використати цей обсяг з користю. "
+            f"3. Пиши живою мовою, з емодзі. "
+            f"4. Без Markdown (зірочок). Тільки чистий текст."
         )
         
         response = await model.generate_content_async(sys_prompt)
         text = response.text.replace("**", "").replace("__", "").replace("```", "").strip()
         
-        # ЗАПОБІЖНИК: Обрізаємо, якщо AI все ж таки написав більше
+        # Запобіжник: якщо AI трохи перевищив ліміт, обрізаємо акуратно
         if len(text) > char_limit:
             text = text[:char_limit]
-            # Спробуємо знайти останню крапку, щоб не різати на півслові
             last_dot = text.rfind('.')
             if last_dot > 0:
-                text = text[:last_dot+1]
+                text = text[:last_dot+1] # Обрізаємо до останньої повної крапки
             
         return text
     except Exception as e:
@@ -126,12 +124,12 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
             has_photo = photo_query is not None
             
             if from_command:
-                await bot.send_message(ADMIN_ID, f"👩‍💻 {platform}: Генерую '{topic}'...")
+                await bot.send_message(ADMIN_ID, f"👩‍💻 {platform}: {topic}...")
 
-            # 1. Генерація тексту
+            # 1. Генерація
             generated_text = await generate_ai_text(topic, ai_prompt, platform, has_photo)
             
-            # 2. Генерація квізу (якщо треба)
+            # 2. Квіз
             if is_quiz and not quiz_data:
                 quiz_data = await generate_quiz_data(topic, ai_prompt)
                 cursor.execute(f"UPDATE {table_name} SET quiz_data = %s WHERE day = %s", (quiz_data, day_now))
@@ -143,22 +141,22 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
                 [InlineKeyboardButton(text="📝 Переписати", callback_data=f"txt_{platform}_{day_now}")]
             ])
 
-            # ВІДПРАВКА АДМІНУ
+            # ВІДПРАВКА
             if is_quiz and quiz_data:
                 p = quiz_data.split("|")
-                # Квіз
-                await bot.send_message(ADMIN_ID, f"🧠 Завдання:\n{generated_text[:4000]}")
+                # Для квізу текст може бути довгим (1500), бо йде окремим повідомленням
+                await bot.send_message(ADMIN_ID, f"🧠 Завдання:\n{generated_text}")
                 await bot.send_poll(chat_id=ADMIN_ID, question=p[0], options=p[1:4], type='quiz', correct_option_id=int(p[4]), reply_markup=keyboard)
 
             elif has_photo:
                 photo_url = await get_photo_url(photo_query)
                 keyboard.inline_keyboard.append([InlineKeyboardButton(text="🖼 Інше фото", callback_data=f"pic_{platform}_{day_now}")])
-                # Фото (Ліміт підпису 1024, ми згенерували до 800)
-                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text[:1024], reply_markup=keyboard)
+                # Тут текст обрізаний до 980, все безпечно
+                await bot.send_photo(chat_id=ADMIN_ID, photo=photo_url, caption=generated_text, reply_markup=keyboard)
 
-            else: # Тільки текст
-                # Текст (Ліміт повідомлення 4096, ми згенерували до 3000)
-                await bot.send_message(ADMIN_ID, generated_text[:4096], reply_markup=keyboard)
+            else: 
+                # Текст до 1500
+                await bot.send_message(ADMIN_ID, generated_text, reply_markup=keyboard)
 
         else:
             if from_command:
@@ -176,7 +174,7 @@ async def prepare_draft(platform, manual_day=None, from_command=False):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Bot Online (Strict Limits)")
+        await message.answer("👋 Bot Online (Balanced Limits)")
 
 @dp.message(Command("generate_tg"))
 async def cmd_gen_tg(message: types.Message):
@@ -200,9 +198,9 @@ async def cb_publish(callback: types.CallbackQuery):
     
     if platform == 'tg':
         if callback.message.photo:
-            await bot.send_photo(CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=text_to_publish[:1024])
+            await bot.send_photo(CHANNEL_ID, photo=callback.message.photo[-1].file_id, caption=text_to_publish)
         elif text_to_publish:
-             await bot.send_message(CHANNEL_ID, text_to_publish[:4096])
+             await bot.send_message(CHANNEL_ID, text_to_publish)
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -257,9 +255,9 @@ async def cb_txt(callback: types.CallbackQuery):
         new_text = await generate_ai_text(topic, prompt, platform, has_photo)
         
         if callback.message.caption:
-            await callback.message.edit_caption(caption=new_text[:1024], reply_markup=callback.message.reply_markup)
+            await callback.message.edit_caption(caption=new_text, reply_markup=callback.message.reply_markup)
         else:
-            await callback.message.edit_text(text=new_text[:4096], reply_markup=callback.message.reply_markup)
+            await callback.message.edit_text(text=new_text, reply_markup=callback.message.reply_markup)
 
 # --- SERVER ---
 async def handle(request): return web.Response(text="Bot is Alive")
@@ -271,7 +269,6 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     
-    # Розклад: ТГ 9:00, Інста 9:10
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
     scheduler.add_job(prepare_draft, 'cron', hour=9, minute=0, args=['tg'])
     scheduler.add_job(prepare_draft, 'cron', hour=9, minute=10, args=['inst'])
