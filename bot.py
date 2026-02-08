@@ -304,7 +304,7 @@ async def main():
     
     scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
     scheduler.add_job(prepare_draft, 'cron', hour=9, minute=0, args=['tg'])
-    scheduler.add_job(prepare_draft, 'cron', hour=9, minute=10, args=['inst'])
+    scheduler.add_job(prepare_draft, 'cron', hour=9, minute=5, args=['inst'])
     scheduler.start()
     
     await bot.delete_webhook(drop_pending_updates=True)
@@ -312,4 +312,5 @@ async def main():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+
     asyncio.run(main())
