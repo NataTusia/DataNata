@@ -193,7 +193,7 @@ async def get_photo_url_debug(query):
     if not query: query = "technology"
     clean_query = urllib.parse.quote(query.strip())
     
-    api_url = f"[https://api.unsplash.com/photos/random?query=](https://api.unsplash.com/photos/random?query=){clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
+    api_url = f"https://api.unsplash.com/photos/random?query={clean_query}&orientation=landscape&client_id={UNSPLASH_KEY}&t={int(time.time())}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as resp:
