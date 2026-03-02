@@ -88,10 +88,12 @@ async def generate_carousel_texts(topic, prompt_text):
         f"Ти контент-мейкер. Напиши текст для Instagram-каруселі (від 5 до 7 слайдів). "
         f"Тема: {topic}. Деталі з контент-плану: {prompt_text}. Мова: Українська. "
         "Вимоги до формату (СТРОГО):\n"
-        "Слайд 1: [Великий Заголовок] - [Хук: 2-3 речення, що інтригують або дають коротке визначення]\n"
-        "Слайд 2: [Заголовок] - [Розгорнутий текст: 5-8 речень. Обов'язково використовуй абзаци та маркери (•) для переліків]\n"
-        "Слайд X: [Заголовок] - [Розгорнутий текст з абзацами...]\n"
-        "Важливо: Розділяй абзаци і списки за допомогою переносу рядка (Enter). Жодних зірочок Markdown (**)."
+        "Пиши кожен слайд, використовуючи символ | (вертикальна риска) як розділювач:\n"
+        "Слайд 1: [Великий Заголовок] | [Хук: 2-3 речення, що інтригують]\n"
+        "Слайд 2: [Заголовок] | [Розгорнутий текст: 5-8 речень. Обов'язково використовуй абзаци (•)]\n"
+        "Слайд X: [Заголовок] | [Розгорнутий текст з абзацами...]\n"
+        "КРИТИЧНО: Використовуй символ | ТІЛЬКИ ОДИН РАЗ на кожному слайді, щоб відділити заголовок від тексту! "
+        "Розділяй абзаци і списки за допомогою переносу рядка (Enter). Жодних зірочок Markdown (**)."
     )
     
     sys_prompt_caption = (
@@ -341,19 +343,19 @@ async def cb_draw_carousel(callback: types.CallbackQuery):
     for i, slide_raw_text in enumerate(slides):
         slide_raw_text = slide_raw_text.strip()
         if not slide_raw_text: continue
-        
-        # Розумне розбиття на заголовок і текст
-        if " - " in slide_raw_text:
-            parts = slide_raw_text.split(" - ", 1)
-            header = parts[0].strip()
-            body = parts[1].strip()
-        elif "\n" in slide_raw_text:
-            parts = slide_raw_text.split("\n", 1)
-            header = parts[0].strip()
-            body = parts[1].strip()
+            
+        # НОВЕ, СТРОГЕ РОЗБИТТЯ ТЕКСТУ
+        if "|" in slide_raw_text:
+                parts = slide_raw_text.split("|", 1) # Ріжемо рівно по рисці
+                header = parts[0].strip()
+                body = parts[1].strip()
+        elif "\n" in slide_raw_text: # Запасний варіант, якщо ШІ "забуде" риску
+                parts = slide_raw_text.split("\n", 1)
+                header = parts[0].strip()
+                body = parts[1].strip()
         else:
-            header = slide_raw_text
-            body = ""
+                header = slide_raw_text
+                body = ""
         
         is_cover = (i == 0)
         
